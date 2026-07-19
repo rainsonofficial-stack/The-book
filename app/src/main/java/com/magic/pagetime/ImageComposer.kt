@@ -35,8 +35,10 @@ object ImageComposer {
         val h = bitmap.height.toFloat()
 
         val boxLeft = w * (marginLeftPct / 100f)
-        val boxRight = w * (1f - marginRightPct / 100f)
         val boxTop = h * (marginTopPct / 100f)
+        // marginRight/marginBottom still define the notional box for anchoring
+        // and rotation pivot, but no longer clip text — see note below.
+        val boxRight = w * (1f - marginRightPct / 100f)
         val boxBottom = h * (1f - marginBottomPct / 100f)
         val centerX = (boxLeft + boxRight) / 2f
         val centerY = (boxTop + boxBottom) / 2f
@@ -61,18 +63,22 @@ object ImageComposer {
         val lines = AcrosticGenerator.generate(context, apiValue)
 
         val fm = bodyPaint.fontMetrics
-        val lineHeight = (fm.descent - fm.ascent) * 1.2f
+        // Reduced from 1.2f — tighter line spacing.
+        val lineHeight = (fm.descent - fm.ascent) * 1.05f
 
-        // Render all text onto its own transparent layer first, so it can be
-        // blurred to match the base photo's natural camera softness before
-        // being composited — crisp vector text on a real photo is a dead
-        // giveaway up close.
         val textLayer = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val textCanvas = Canvas(textLayer)
 
         textCanvas.save()
+        // Page number and paragraph text both rotate together around the same
+        // pivot, since they're drawn inside this same rotated block.
         textCanvas.rotate(rotationDeg, centerX, centerY)
-        textCanvas.clipRect(boxLeft, boxTop, boxRight, boxBottom)
+
+        // No clipRect here anymore. Text is free to extend past the margin
+        // box; Canvas only ever draws within the actual bitmap bounds, so
+        // when rotated, text gets cut off naturally by the photo's real edge
+        // instead of leaving an artificial blank wedge from a rotated clip
+        // rectangle.
 
         val pageNumFm = pageNumberPaint.fontMetrics
         val pageNumberBaselineY = boxTop - pageNumFm.ascent
