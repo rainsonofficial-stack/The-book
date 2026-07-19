@@ -64,10 +64,6 @@ object AcrosticGenerator {
         return Pair(starters, mids)
     }
 
-    // mode: "starterOnly" forces a paragraph-opening line (first letter of the
-    // whole page, or first letter of a new word/paragraph). "midOnly" forces
-    // a non-starter (used right after a starter, to avoid two in a row).
-    // "any" lets rotation pick whichever comes up next.
     private fun nextLineForLetter(context: Context, letter: Char, mode: String): Pair<String, Boolean> {
         val bank = loadBank(context)
         val upper = letter.uppercaseChar()
@@ -100,21 +96,37 @@ object AcrosticGenerator {
         val random = Random(System.nanoTime())
 
         val rawWords = apiValue.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-        val wordLetterLists = rawWords.map { expandToLetters(it) }.filter { it.isNotEmpty() }
 
         val lines = mutableListOf<LineEntry>()
         var totalLetterCount = 0
         var lastWasStarter = false
+        var isFirstWord = true
 
-        wordLetterLists.forEachIndexed { wIndex, letters ->
-            if (wIndex > 0) {
+        for (word in rawWords) {
+            if (!isFirstWord) {
                 lines.add(LineEntry("", isBlank = true))
                 lines.add(LineEntry("", isBlank = true))
             }
+            isFirstWord = false
+
+            // Standalone numbers longer than 2 digits become their own
+            // single-line paragraph using the fixed template, instead of
+            // being spelled out letter by letter.
+            if (word.all { it.isDigit() } && word.length > 2) {
+                val specialLine = "$word horses were taken as a bribe in addition to the gold coins"
+                lines.add(LineEntry(INDENT + specialLine))
+                lastWasStarter = true // acts as a paragraph opener
+                totalLetterCount++
+                continue
+            }
+
+            val letters = expandToLetters(word)
+            if (letters.isEmpty()) continue
+
             letters.forEachIndexed { lIndex, ch ->
                 val mode = when {
-                    lIndex == 0 -> "starterOnly"           // first letter of every word/paragraph
-                    lastWasStarter -> "midOnly"             // never two starters in a row
+                    lIndex == 0 -> "starterOnly"
+                    lastWasStarter -> "midOnly"
                     else -> "any"
                 }
                 val (raw, wasStarter) = nextLineForLetter(context, ch, mode)
@@ -133,7 +145,7 @@ object AcrosticGenerator {
             for (i in 0 until needed) {
                 val ch = alphabet[random.nextInt(alphabet.size)]
                 val mode = when {
-                    i == 0 -> "starterOnly"                // first letter of this filler paragraph
+                    i == 0 -> "starterOnly"
                     lastWasStarter -> "midOnly"
                     else -> "any"
                 }
