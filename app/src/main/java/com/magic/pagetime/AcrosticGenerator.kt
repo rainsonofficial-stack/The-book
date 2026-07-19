@@ -13,10 +13,8 @@ object AcrosticGenerator {
     private const val INDENT = "\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0"
 
     private var letterBank: Map<Char, List<String>>? = null
+    private var andLinesCache: List<String>? = null
 
-    // Fairness tracking: bankKey -> (line text -> times used). bankKey is the
-    // letter ("A", "B", ...) or "AND" for the special and-lines pool. Ensures
-    // a line only repeats after every other line in its pool has appeared.
     private val usage = mutableMapOf<String, MutableMap<String, Int>>()
 
     private fun loadBank(context: Context): Map<Char, List<String>> {
@@ -38,6 +36,14 @@ object AcrosticGenerator {
         } catch (e: Exception) {
             emptyMap()
         }
+    }
+
+    private fun andLines(context: Context): List<String> {
+        andLinesCache?.let { return it }
+        val aLines = loadBank(context)['A'] ?: emptyList()
+        val result = aLines.filter { it.trim().lowercase().startsWith("and") }
+        andLinesCache = result
+        return result
     }
 
     private fun digitToWord(c: Char): String = when (c) {
@@ -63,10 +69,6 @@ object AcrosticGenerator {
         return firstChar.isUpperCase()
     }
 
-    // Strips accents (é->e, ö->o, etc.) via Unicode NFD decomposition, then
-    // removes the leftover combining marks. Anything that still isn't a
-    // plain ASCII letter or digit is left as-is here — it gets filtered out
-    // naturally by the segmentation split below (treated as a delimiter).
     private fun normalizeText(input: String): String {
         val decomposed = Normalizer.normalize(input, Normalizer.Form.NFD)
         return decomposed.replace(Regex("\\p{Mn}+"), "")
@@ -82,13 +84,20 @@ object AcrosticGenerator {
         return chosen
     }
 
-    // mode: "starterOnly" forces a paragraph-opening line, "midOnly" forces a
-    // non-starter (avoids two starters in a row), "any" lets fairness alone decide.
     private fun nextLineForLetter(context: Context, letter: Char, mode: String, random: Random): Pair<String, Boolean> {
         val bank = loadBank(context)
         val upper = letter.uppercaseChar()
-        val options = bank[upper] ?: return Pair(letter.toString(), false)
+        var options = bank[upper] ?: return Pair(letter.toString(), false)
         if (options.isEmpty()) return Pair(letter.toString(), false)
+
+        // The dedicated "and" lines are reserved for the solo-word "and"
+        // case only — exclude them from normal letter-A selection so they
+        // can never be double-picked from two different pools.
+        if (upper == 'A') {
+            val reserved = andLines(context)
+            options = options.filterNot { reserved.contains(it) }
+            if (options.isEmpty()) options = bank[upper]!! // safety net if everything got filtered
+        }
 
         val starters = options.filter { isStarter(it) }
         val mids = options.filter { !isStarter(it) }
@@ -104,25 +113,26 @@ object AcrosticGenerator {
     }
 
     private fun nextAndLine(context: Context, random: Random): String {
-        val bank = loadBank(context)
-        val aLines = bank['A'] ?: return "and"
-        val andLines = aLines.filter { it.trim().lowercase().startsWith("and") }
-        if (andLines.isEmpty()) return "and"
-        return pickFair("AND", andLines, random)
+        val lines = andLines(context)
+        if (lines.isEmpty()) return "and"
+        return pickFair("AND", lines, random)
     }
 
-    // Splits the whole input on ANY run of non-alphanumeric characters
-    // (spaces, hyphens, brackets, apostrophes, punctuation, unrecognizable
-    // symbols/emoji, etc.) in one pass. This means word boundaries AND
-    // symbol boundaries both naturally start a new paragraph, with no
-    // special-casing needed for each symbol type.
+    // Two-stage cleanup:
+    // 1. Soft characters (apostrophe, colon) are silently removed — they
+    //    never break a paragraph, just stitch the surrounding letters together.
+    // 2. Whatever remains is split on any run of non-alphanumeric characters
+    //    (spaces, hyphens, brackets, other punctuation/symbols) — these DO
+    //    start a new paragraph.
     private fun segmentInput(apiValue: String): List<String> {
         val normalized = normalizeText(apiValue)
-        return normalized.split(Regex("[^A-Za-z0-9]+")).filter { it.isNotBlank() }
+        val softStripped = normalized.replace(Regex("['\u2019:]"), "")
+        return softStripped.split(Regex("[^A-Za-z0-9]+")).filter { it.isNotBlank() }
     }
 
     fun generate(context: Context, apiValue: String): List<LineEntry> {
         usage.clear()
+        andLinesCache = null
         val random = Random(System.nanoTime())
 
         val segments = segmentInput(apiValue)
@@ -130,48 +140,58 @@ object AcrosticGenerator {
         val lines = mutableListOf<LineEntry>()
         var totalLineCount = 0
         var lastWasStarter = false
-        var isFirstSegment = true
+        var suppressNextBreak = false // true right after "and", so the following word doesn't start a new paragraph
 
-        for (segment in segments) {
-            if (!isFirstSegment) {
-                lines.add(LineEntry("", isBlank = true))
-                lines.add(LineEntry("", isBlank = true))
-            }
-            isFirstSegment = false
-
+        segments.forEachIndexed { segIndex, segment ->
             val isAndWord = segment.equals("and", ignoreCase = true)
             val isPureDigits = segment.all { it.isDigit() }
 
+            val isNewParagraph = segIndex == 0 || (!isAndWord && !suppressNextBreak)
+
+            if (segIndex > 0 && !isAndWord && !suppressNextBreak) {
+                lines.add(LineEntry("", isBlank = true))
+                lines.add(LineEntry("", isBlank = true))
+            }
+
             when {
                 isAndWord -> {
+                    // "and" connects the previous and next paragraphs — no
+                    // break before it, no indent (it's a continuation line),
+                    // and it suppresses the break before the following word too.
                     val andLine = nextAndLine(context, random)
-                    lines.add(LineEntry(INDENT + andLine))
+                    lines.add(LineEntry(andLine))
                     lastWasStarter = true
                     totalLineCount++
+                    suppressNextBreak = true
                 }
                 isPureDigits && segment.length >= 2 -> {
                     val specialLine = "$segment horses were taken as a bribe in addition to the gold coins"
-                    lines.add(LineEntry(INDENT + specialLine))
+                    val text = if (isNewParagraph) INDENT + specialLine else specialLine
+                    lines.add(LineEntry(text))
                     lastWasStarter = true
                     totalLineCount++
+                    suppressNextBreak = false
                 }
                 else -> {
-                    // Covers: single-digit numbers (spelled via digitToWord),
-                    // plain words, and mixed alnum segments.
                     val letters = expandToLetters(segment)
-                    if (letters.isEmpty()) continue
+                    if (letters.isEmpty()) {
+                        suppressNextBreak = false
+                        return@forEachIndexed
+                    }
                     letters.forEachIndexed { lIndex, ch ->
+                        val forceStarter = lIndex == 0 && isNewParagraph
                         val mode = when {
-                            lIndex == 0 -> "starterOnly"
+                            forceStarter -> "starterOnly"
                             lastWasStarter -> "midOnly"
                             else -> "any"
                         }
                         val (raw, wasStarter) = nextLineForLetter(context, ch, mode, random)
-                        val text = if (lIndex == 0) INDENT + raw else raw
+                        val text = if (lIndex == 0 && isNewParagraph) INDENT + raw else raw
                         lines.add(LineEntry(text))
                         lastWasStarter = wasStarter
                         totalLineCount++
                     }
+                    suppressNextBreak = false
                 }
             }
         }
